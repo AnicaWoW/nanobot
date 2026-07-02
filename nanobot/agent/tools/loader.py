@@ -83,9 +83,26 @@ class ToolLoader:
         self._plugins = plugins
         return plugins
 
+    @staticmethod
+    def _allowed_tools(ctx: Any) -> set[str] | None:
+        """Global tool allowlist from `tools.allowed_tools` (None = allow all).
+
+        `ctx.config` is the ToolsConfig at load time; fall back through a
+        top-level Config's `.tools` if a caller passes that instead.
+        """
+        try:
+            tools_cfg = ctx.config if hasattr(ctx.config, "allowed_tools") else getattr(ctx.config, "tools", ctx.config)
+            names = [str(n) for n in (getattr(tools_cfg, "allowed_tools", None) or [])]
+        except Exception:
+            return None
+        if not names or "*" in names:
+            return None
+        return set(names)
+
     def load(self, ctx: Any, registry: ToolRegistry, *, scope: str = "core") -> list[str]:
         registered: list[str] = []
         builtin_names: set[str] = set()
+        allow = self._allowed_tools(ctx)
         sources = [(self.discover(), False), (self._discover_plugins().values(), True)]
         for source, is_plugin_source in sources:
             for tool_cls in source:
@@ -96,6 +113,8 @@ class ToolLoader:
                     if not tool_cls.enabled(ctx):
                         continue
                     tool = tool_cls.create(ctx)
+                    if allow is not None and tool.name not in allow:
+                        continue
                     if registry.has(tool.name):
                         if is_plugin_source and tool.name in builtin_names:
                             logger.warning(
