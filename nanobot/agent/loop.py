@@ -1265,6 +1265,10 @@ class AgentLoop:
             )
 
         key = session_key or msg.session_key
+        # Allow a channel to request ephemeral processing via inbound metadata
+        # (e.g. an operator/admin channel whose turns must skip memory
+        # consolidation and never leak into workspace-global memory).
+        ephemeral = ephemeral or bool(msg.metadata.get("ephemeral", False))
         t0 = time.time()
         ctx = TurnContext(
             msg=msg,
