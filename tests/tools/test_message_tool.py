@@ -161,7 +161,55 @@ async def test_message_tool_does_not_inherit_metadata_for_cross_target() -> None
 
     await tool.execute(content="channel reply", channel="slack", chat_id="C999")
 
-    assert sent[0].metadata == {}
+    # The source conversation's metadata is not inherited across a cross-target
+    # send; the send carries only the channel-delivery marker so the target
+    # session records this proactive message.
+    assert "slack" not in sent[0].metadata
+    assert sent[0].metadata == {"_record_channel_delivery": True}
+
+
+@pytest.mark.asyncio
+async def test_message_tool_records_proactive_cross_channel_text() -> None:
+    """A plain-text send to a conversation other than the one driving the turn is
+    marked for recording, so the target channel's session (hence the operator's
+    read-only view / read_user_conversation) captures it — parity with media
+    sends. Same-target replies and websocket targets are left alone."""
+    sent: list[OutboundMessage] = []
+
+    async def _send(msg: OutboundMessage) -> None:
+        sent.append(msg)
+
+    tool = MessageTool(send_callback=_send)
+    from nanobot.agent.tools.context import RequestContext
+
+    tool.set_context(RequestContext(channel="admin", chat_id="operator", metadata={}))
+
+    # same-target reply: the turn's own session records it, so not marked here
+    await tool.execute(content="ok", channel="admin", chat_id="operator")
+    assert sent[-1].metadata == {}
+
+    # proactive text to the user's (webhook) channel: marked for the target session
+    await tool.execute(content="Hallo", channel="whatsapp_gw", chat_id="+4915100000001")
+    assert sent[-1].metadata == {"_record_channel_delivery": True}
+
+    # proactive text to a websocket chat: the webui subsystem persists it, so this
+    # path must not also mark it (would double-record)
+    await tool.execute(content="hi", channel="websocket", chat_id="chat-xyz")
+    assert sent[-1].metadata == {}
+
+
+@pytest.mark.asyncio
+async def test_message_tool_no_context_does_not_mark_cross_channel_text() -> None:
+    """With no active turn context (e.g. a cron/CLI send), a plain-text send is not
+    auto-marked — the caller opts in explicitly via set_record_channel_delivery."""
+    sent: list[OutboundMessage] = []
+
+    async def _send(msg: OutboundMessage) -> None:
+        sent.append(msg)
+
+    tool = MessageTool(send_callback=_send)
+    await tool.execute(content="scheduled ping", channel="telegram", chat_id="1")
+    assert sent[-1].metadata == {}
 
 
 @pytest.mark.asyncio

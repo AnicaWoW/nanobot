@@ -243,7 +243,21 @@ class MessageTool(Tool, ContextAware):
         metadata = dict(self._default_metadata.get()) if same_target else {}
         if message_id:
             metadata["message_id"] = message_id
-        if self._record_channel_delivery_var.get() or media:
+        # A proactive / cross-channel send — one that targets a conversation other
+        # than the one driving this turn — is delivered to the channel but is never
+        # written into that channel's own session, unlike a normal turn reply. So a
+        # message the agent sends a user from the admin channel reaches the user but
+        # is invisible to the operator's read-only conversation view and to
+        # read_user_conversation (both read the target session). Mark it so the send
+        # callback mirrors it into the target session, exactly as media sends already
+        # opt in. Requires an active turn context (default_channel set) so unrelated
+        # cron/CLI sends keep their explicit opt-in. "websocket" keeps its own
+        # transcript via the webui subsystem and "cli" has no session — exclude both
+        # to avoid double-recording.
+        proactive_cross_channel = (
+            bool(default_channel) and not same_target and channel not in ("websocket", "cli")
+        )
+        if self._record_channel_delivery_var.get() or media or proactive_cross_channel:
             metadata["_record_channel_delivery"] = True
 
         msg = OutboundMessage(
