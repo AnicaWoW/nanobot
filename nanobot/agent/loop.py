@@ -42,6 +42,7 @@ from nanobot.command import CommandContext, CommandRouter, register_builtin_comm
 from nanobot.config.schema import AgentDefaults, ModelPresetConfig
 from nanobot.cron.session_turns import (
     cron_history_overrides,
+    cron_turn_elected_silence,
 )
 from nanobot.providers.base import LLMProvider
 from nanobot.providers.factory import ProviderSnapshot
@@ -1360,6 +1361,14 @@ class AgentLoop:
         if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
             if not had_injections or stop_reason == "empty_final_response":
                 return None
+
+        # Scheduled cron turns may elect silence (blank final or NO_MESSAGE):
+        # nothing is delivered for this run.
+        if cron_turn_elected_silence(msg.metadata, final_content, stop_reason):
+            logger.info(
+                "Cron turn elected silence for {}:{}", msg.channel, msg.chat_id
+            )
+            return None
 
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)

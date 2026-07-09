@@ -10,6 +10,9 @@ CRON_TRIGGER_META = "_cron_trigger"
 CRON_DEFER_UNTIL_IDLE_META = "_cron_defer_until_session_idle"
 CRON_HISTORY_META = "_cron_turn"
 
+# A scheduled turn replying with exactly this sentinel delivers nothing.
+CRON_SILENCE_SENTINEL = "NO_MESSAGE"
+
 
 def cron_trigger(metadata: Mapping[str, Any] | None) -> dict[str, Any] | None:
     """Return structured cron trigger metadata when present."""
@@ -34,6 +37,26 @@ def cron_run_id(metadata: Mapping[str, Any] | None) -> str | None:
         return None
     value = trigger.get("run_id")
     return value if isinstance(value, str) and value else None
+
+
+def cron_turn_elected_silence(
+    metadata: Mapping[str, Any] | None,
+    final_content: str,
+    stop_reason: str,
+) -> bool:
+    """True when a scheduled cron turn produced nothing deliverable.
+
+    A scheduled turn has no user waiting on an answer: blank final text
+    (which the runner replaces with an error placeholder for interactive
+    turns) or the explicit ``NO_MESSAGE`` sentinel means "nothing to deliver
+    this run", not a failed answer. Interactive turns are never affected.
+    """
+    if not is_cron_turn(metadata):
+        return False
+    if stop_reason == "empty_final_response":
+        return True
+    stripped = final_content.strip()
+    return not stripped or stripped == CRON_SILENCE_SENTINEL
 
 
 def cron_history_overrides(metadata: Mapping[str, Any] | None) -> tuple[str | None, dict[str, Any]]:
