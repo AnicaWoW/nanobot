@@ -3,12 +3,16 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import MagicMock
 
+from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.tools.base import Tool
 from nanobot.agent.tools.context import ToolContext
 from nanobot.agent.tools.loader import ToolLoader
 from nanobot.agent.tools.registry import ToolRegistry
+from nanobot.bus.queue import MessageBus
 from nanobot.config.schema import ToolsConfig
+from nanobot.providers.base import LLMProvider
 
 # The accounting-rig surface: file + exec tools (skills run under exec), message
 # (delivery), plus the `read_user_conversation` extension tool which is not part
@@ -112,3 +116,57 @@ def test_empty_allowlist_falls_back_to_all(tmp_path):
     loader = ToolLoader(test_classes=[_named_tool("anything")])
     registry = ToolRegistry()
     assert loader.load(ctx, registry) == ["anything"]
+
+
+# ---------------------------------------------------------------------------
+# Subagent registries: SubagentManager builds a FRESH ToolsConfig for spawned
+# subagents, so the allowlist must propagate into it or subagent tool loading
+# silently falls back to the schema default ["*"] and bypasses the deny-by-
+# default posture.
+# ---------------------------------------------------------------------------
+
+
+def _make_subagent_manager(tmp_path, tools_config: ToolsConfig | None = None) -> SubagentManager:
+    provider = MagicMock(spec=LLMProvider)
+    provider.get_default_model.return_value = "test-model"
+    return SubagentManager(
+        provider=provider,
+        workspace=tmp_path,
+        bus=MessageBus(),
+        model="test-model",
+        max_tool_result_chars=16_000,
+        tools_config=tools_config,
+    )
+
+
+def test_subagent_registry_honors_allowlist(tmp_path):
+    """A concrete allowlist propagates into the subagent registry: exactly those names.
+
+    This also covers the drift vector the propagation exists for: the fresh
+    subagent ToolsConfig re-defaults sections the manager does not copy (e.g.
+    cli_apps), so without the allowlist `run_cli_app` would register in
+    subagents even when the main config disables it.
+    """
+    sm = _make_subagent_manager(tmp_path, ToolsConfig(allowed_tools=["read_file", "exec"]))
+    assert set(sm._build_tools().tool_names) == {"read_file", "exec"}
+
+
+def test_subagent_registry_wildcard_keeps_current_behavior(tmp_path):
+    """Default ["*"] keeps the pre-propagation surface: every subagent-scope tool
+    that passes enabled() registers; core-only tools stay out via scoping."""
+    sm = _make_subagent_manager(tmp_path)
+    names = set(sm._build_tools().tool_names)
+    assert {"read_file", "write_file", "edit_file", "grep", "find_files", "exec"} <= names
+    for core_only in ("message", "spawn", "cron", "long_task"):
+        assert core_only not in names
+
+
+def test_subagent_web_tools_stay_out_when_disabled_regardless_of_allowlist(tmp_path):
+    """The allowlist only ever narrows: web.enable=false keeps web tools out even
+    when the allowlist would permit them."""
+    cfg = ToolsConfig.model_validate({
+        "allowed_tools": ["read_file", "web_search", "web_fetch"],
+        "web": {"enable": False},
+    })
+    sm = _make_subagent_manager(tmp_path, cfg)
+    assert set(sm._build_tools().tool_names) == {"read_file"}

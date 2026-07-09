@@ -120,6 +120,7 @@ class SubagentManager:
             web=self.tools_config.web,
             file=self.tools_config.file,
             restrict_to_workspace=self.restrict_to_workspace,
+            allowed_tools=list(self.tools_config.allowed_tools),
         )
 
     def _build_tools(
