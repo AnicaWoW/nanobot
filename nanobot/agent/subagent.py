@@ -159,6 +159,7 @@ class SubagentManager:
         origin_message_id: str | None = None,
         temperature: float | None = None,
         workspace_scope: WorkspaceScope | None = None,
+        ephemeral: bool = False,
     ) -> str:
         """Spawn a subagent to execute a task in the background."""
         task_id = str(uuid.uuid4())[:8]
@@ -183,6 +184,7 @@ class SubagentManager:
                 origin_message_id,
                 temperature,
                 workspace_scope,
+                ephemeral,
             )
         )
         self._running_tasks[task_id] = bg_task
@@ -212,6 +214,7 @@ class SubagentManager:
         origin_message_id: str | None = None,
         temperature: float | None = None,
         workspace_scope: WorkspaceScope | None = None,
+        ephemeral: bool = False,
     ) -> None:
         """Execute the subagent task and announce the result."""
         logger.info("Subagent [{}] starting task: {}", task_id, label)
@@ -269,24 +272,30 @@ class SubagentManager:
                 await self._announce_result(
                     task_id, label, task,
                     self._format_partial_progress(result),
-                    origin, "error", origin_message_id,
+                    origin, "error", origin_message_id, ephemeral=ephemeral,
                 )
             elif result.stop_reason == "error":
                 await self._announce_result(
                     task_id, label, task,
                     result.error or "Error: subagent execution failed.",
-                    origin, "error", origin_message_id,
+                    origin, "error", origin_message_id, ephemeral=ephemeral,
                 )
             else:
                 final_result = result.final_content or "Task completed but no final response was generated."
                 logger.info("Subagent [{}] completed successfully", task_id)
-                await self._announce_result(task_id, label, task, final_result, origin, "ok", origin_message_id)
+                await self._announce_result(
+                    task_id, label, task, final_result, origin, "ok", origin_message_id,
+                    ephemeral=ephemeral,
+                )
 
         except Exception as e:
             status.phase = "error"
             status.error = str(e)
             logger.exception("Subagent [{}] failed", task_id)
-            await self._announce_result(task_id, label, task, f"Error: {e}", origin, "error", origin_message_id)
+            await self._announce_result(
+                task_id, label, task, f"Error: {e}", origin, "error", origin_message_id,
+                ephemeral=ephemeral,
+            )
 
     async def _announce_result(
         self,
@@ -297,6 +306,7 @@ class SubagentManager:
         origin: dict[str, str],
         status: str,
         origin_message_id: str | None = None,
+        ephemeral: bool = False,
     ) -> None:
         """Announce the subagent result to the main agent via the message bus."""
         status_text = "completed successfully" if status == "ok" else "failed"
@@ -321,6 +331,10 @@ class SubagentManager:
         }
         if origin_message_id:
             metadata["origin_message_id"] = origin_message_id
+        if ephemeral:
+            # The spawning turn was ephemeral; mark the announce so the turn it
+            # triggers keeps the same memory posture (see _process_system_message).
+            metadata["ephemeral"] = True
         msg = InboundMessage(
             channel="system",
             sender_id="subagent",

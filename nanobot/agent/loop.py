@@ -1155,6 +1155,12 @@ class AgentLoop:
         )
         logger.info("Processing system message from {}", msg.sender_id)
         key = msg.session_key_override or f"{channel}:{chat_id}"
+        # A system message may inherit the ephemeral flag of the turn that
+        # produced it (e.g. a subagent announce from an ephemeral spawn): the
+        # turn still persists to the session for multi-turn continuity, but the
+        # steps TurnContext.ephemeral guards in the normal path — memory
+        # consolidation/Dream and recent-history injection — are skipped.
+        ephemeral = bool(msg.metadata.get("ephemeral", False))
         session = self.sessions.get_or_create(key)
         if self._restore_runtime_checkpoint(session):
             self.sessions.save(session)
@@ -1165,10 +1171,11 @@ class AgentLoop:
         if pending:
             logger.info("Memory compact triggered for session {}", key)
 
-        await self.consolidator.maybe_consolidate_by_tokens(
-            session,
-            replay_max_messages=self._max_messages,
-        )
+        if not ephemeral:
+            await self.consolidator.maybe_consolidate_by_tokens(
+                session,
+                replay_max_messages=self._max_messages,
+            )
         is_subagent = msg.sender_id == "subagent"
         if is_subagent and self._persist_subagent_followup(session, msg):
             logger.debug("Subagent result persisted for session {}", key)
@@ -1200,6 +1207,7 @@ class AgentLoop:
             runtime_state=self,
             inbound_message=msg,
             skip_runtime_lines=is_subagent,
+            include_memory_recent_history=not ephemeral,
             session_key=key,
             unified_session=self._unified_session,
         )
@@ -1215,23 +1223,28 @@ class AgentLoop:
         latency_ms = max(0, int((wall_done - t_wall) * 1000))
         self._save_turn(session, all_msgs, 1 + len(history), turn_latency_ms=latency_ms)
         self._runtime_events().record_turn_latency(key, latency_ms)
-        session.enforce_file_cap(
-            on_archive=partial(self.context.memory.raw_archive, session_key=key)
-        )
+        if not ephemeral:
+            session.enforce_file_cap(
+                on_archive=partial(self.context.memory.raw_archive, session_key=key)
+            )
         self._clear_runtime_checkpoint(session)
         self.sessions.save(session)
-        self._schedule_background(
-            self.consolidator.maybe_consolidate_by_tokens(
-                session,
-                replay_max_messages=self._max_messages,
+        if not ephemeral:
+            self._schedule_background(
+                self.consolidator.maybe_consolidate_by_tokens(
+                    session,
+                    replay_max_messages=self._max_messages,
+                )
             )
-        )
         content = final_content or "Background task completed."
         outbound_metadata: dict[str, Any] = {}
         if channel == "slack" and key.startswith("slack:") and key.count(":") >= 2:
             outbound_metadata["slack"] = {"thread_ts": key.split(":", 2)[2]}
         if origin_message_id := msg.metadata.get("origin_message_id"):
             outbound_metadata["origin_message_id"] = origin_message_id
+        if ephemeral:
+            # Ephemeral turns tag their outbound with the stop reason (cf. _state_respond).
+            outbound_metadata["_stop_reason"] = stop_reason
         return OutboundMessage(
             channel=channel,
             chat_id=chat_id,

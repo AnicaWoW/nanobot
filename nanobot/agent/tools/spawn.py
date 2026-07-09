@@ -42,6 +42,7 @@ class SpawnTool(Tool, ContextAware):
             "spawn_origin_message_id",
             default=None,
         )
+        self._ephemeral: ContextVar[bool] = ContextVar("spawn_ephemeral", default=False)
 
     @classmethod
     def create(cls, ctx: Any) -> Tool:
@@ -53,6 +54,7 @@ class SpawnTool(Tool, ContextAware):
         self._origin_chat_id.set(ctx.chat_id)
         self._session_key.set(ctx.session_key or f"{ctx.channel}:{ctx.chat_id}")
         self._origin_message_id.set(ctx.message_id)
+        self._ephemeral.set(bool(ctx.metadata.get("ephemeral", False)))
 
     @property
     def name(self) -> str:
@@ -93,4 +95,5 @@ class SpawnTool(Tool, ContextAware):
             origin_message_id=self._origin_message_id.get(),
             temperature=temperature,
             workspace_scope=current_workspace_scope(),
+            ephemeral=self._ephemeral.get(),
         )

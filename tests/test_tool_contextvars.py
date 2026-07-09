@@ -68,6 +68,7 @@ async def test_spawn_tool_keeps_task_local_context() -> None:
             origin_message_id: str | None = None,
             temperature: float | None = None,
             workspace_scope=None,
+            ephemeral: bool = False,
         ) -> str:
             seen.append((origin_channel, origin_chat_id, session_key))
             return f"{origin_channel}:{origin_chat_id}:{task}"
@@ -189,6 +190,7 @@ async def test_spawn_tool_basic_set_context_and_execute() -> None:
             origin_message_id=None,
             temperature=None,
             workspace_scope=None,
+            ephemeral=False,
         ):
             seen.append((origin_channel, origin_chat_id, session_key))
             return f"ok: {task}"
@@ -223,6 +225,7 @@ async def test_spawn_tool_default_values_without_set_context() -> None:
             origin_message_id=None,
             temperature=None,
             workspace_scope=None,
+            ephemeral=False,
         ):
             seen.append((origin_channel, origin_chat_id, session_key))
             return "ok"
@@ -231,6 +234,46 @@ async def test_spawn_tool_default_values_without_set_context() -> None:
 
     await tool.execute(task="test")
     assert seen == [("cli", "direct", "cli:direct")]
+
+
+@pytest.mark.asyncio
+async def test_spawn_tool_propagates_ephemeral_from_metadata() -> None:
+    """The spawning turn's metadata.ephemeral flag reaches manager.spawn()."""
+    seen: list[bool] = []
+
+    class _Manager:
+        max_concurrent_subagents = 2
+
+        def get_running_count(self) -> int:
+            return 0
+
+        async def spawn(
+            self,
+            *,
+            task,
+            label,
+            origin_channel,
+            origin_chat_id,
+            session_key,
+            origin_message_id=None,
+            temperature=None,
+            workspace_scope=None,
+            ephemeral=False,
+        ):
+            seen.append(ephemeral)
+            return "ok"
+
+    tool = SpawnTool(_Manager())
+
+    tool.set_context(
+        RequestContext(channel="admin", chat_id="operator", metadata={"ephemeral": True})
+    )
+    await tool.execute(task="from an ephemeral turn")
+
+    tool.set_context(RequestContext(channel="admin", chat_id="operator"))
+    await tool.execute(task="from a persistent turn")
+
+    assert seen == [True, False]
 
 
 @pytest.mark.asyncio

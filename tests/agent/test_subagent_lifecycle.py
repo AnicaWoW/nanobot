@@ -211,6 +211,24 @@ class TestSpawn:
         assert len(sm._task_statuses) == 0
         assert len(sm._session_tasks) == 0
 
+    @pytest.mark.asyncio
+    async def test_spawn_threads_ephemeral_flag_to_announce(self, tmp_path):
+        """spawn(ephemeral=True) marks the result announce; the default leaves it unmarked."""
+        sm = _manager(tmp_path)
+        sm.runner.run = AsyncMock(return_value=AgentRunResult(
+            final_content="done", messages=[], stop_reason="completed",
+        ))
+        published = []
+        sm.bus.publish_inbound = AsyncMock(side_effect=lambda msg: published.append(msg))
+
+        await sm.spawn("task", session_key="s1", ephemeral=True)
+        await _drain_subagent_tasks(sm)
+        await sm.spawn("task two", session_key="s1")
+        await _drain_subagent_tasks(sm)
+
+        assert published[0].metadata["ephemeral"] is True
+        assert "ephemeral" not in published[1].metadata
+
 
 # ---------------------------------------------------------------------------
 # _run_subagent
@@ -367,6 +385,35 @@ class TestAnnounceResult:
         )
 
         assert published[0].metadata["origin_message_id"] == "msg-123"
+
+    @pytest.mark.asyncio
+    async def test_ephemeral_flag_in_metadata(self, tmp_path):
+        """An ephemeral spawning turn marks the announce so the turn it triggers
+        keeps the same memory posture (no consolidation/Dream)."""
+        sm = _manager(tmp_path)
+        published = []
+        sm.bus.publish_inbound = AsyncMock(side_effect=lambda msg: published.append(msg))
+
+        await sm._announce_result(
+            "t1", "label", "task", "result",
+            {"channel": "admin", "chat_id": "operator"}, "ok",
+            ephemeral=True,
+        )
+
+        assert published[0].metadata["ephemeral"] is True
+
+    @pytest.mark.asyncio
+    async def test_no_ephemeral_flag_by_default(self, tmp_path):
+        sm = _manager(tmp_path)
+        published = []
+        sm.bus.publish_inbound = AsyncMock(side_effect=lambda msg: published.append(msg))
+
+        await sm._announce_result(
+            "t1", "label", "task", "result",
+            {"channel": "cli", "chat_id": "direct"}, "ok",
+        )
+
+        assert "ephemeral" not in published[0].metadata
 
 
 # ---------------------------------------------------------------------------
