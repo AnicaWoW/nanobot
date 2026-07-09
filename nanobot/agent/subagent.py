@@ -255,7 +255,12 @@ class SubagentManager:
                     max_iterations_message="Task completed but no final response was generated.",
                     finalize_on_max_iterations=False,
                     error_message=None,
-                    fail_on_tool_error=True,
+                    # Feed tool errors back to the model like the main loop does —
+                    # an invalid tool call (bad param, schema slip) is recoverable,
+                    # and aborting a long background run on the first one turns
+                    # model sloppiness into task failure. max_iterations still caps
+                    # a run that cannot recover.
+                    fail_on_tool_error=False,
                     checkpoint_callback=_on_checkpoint,
                     session_key=sess_key,
                     workspace=root,

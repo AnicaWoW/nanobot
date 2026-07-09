@@ -267,6 +267,24 @@ class TestRunSubagent:
             assert mock_announce.call_args.args[-2] == "error"
 
     @pytest.mark.asyncio
+    async def test_tool_errors_fed_back_not_fatal(self, tmp_path):
+        """The run spec must not abort on tool errors: an invalid tool call is
+        recoverable — the model corrects on the next iteration (main-loop
+        parity); max_iterations still caps a run that cannot recover."""
+        sm = _manager(tmp_path)
+        sm.runner.run = AsyncMock(return_value=AgentRunResult(
+            final_content="ok", messages=[], stop_reason="completed",
+        ))
+        with patch.object(sm, "_announce_result", new_callable=AsyncMock):
+            await sm._run_subagent(
+                "t1", "do task", "label",
+                {"channel": "cli", "chat_id": "direct"},
+                SubagentStatus(task_id="t1", label="label", task_description="do task", started_at=time.monotonic()),
+            )
+        spec = sm.runner.run.call_args.args[0]
+        assert spec.fail_on_tool_error is False
+
+    @pytest.mark.asyncio
     async def test_exception_run(self, tmp_path):
         sm = _manager(tmp_path)
         sm.runner.run = AsyncMock(side_effect=RuntimeError("LLM down"))
