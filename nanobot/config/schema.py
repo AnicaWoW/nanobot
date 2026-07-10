@@ -129,6 +129,7 @@ class AgentDefaults(Base):
     fallback_models: list[FallbackCandidate] = Field(default_factory=list)
     max_tool_iterations: int = 200
     max_concurrent_subagents: int = Field(default=1, ge=1)
+    subagent_drain_wait_seconds: float = Field(default=300.0, ge=0)  # How long a turn's injection drain blocks for running subagents so results consolidate into one response; 0 = never block, completions dispatch as their own turn
     max_tool_result_chars: int = 16_000
     provider_retry_mode: Literal["standard", "persistent"] = "standard"
     tool_hint_max_length: int = Field(

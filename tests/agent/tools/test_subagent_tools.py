@@ -482,3 +482,93 @@ async def test_drain_pending_timeout(tmp_path):
         await hang_task
     except asyncio.CancelledError:
         pass
+
+@pytest.mark.asyncio
+async def test_drain_pending_zero_wait_never_blocks(tmp_path):
+    """subagent_drain_wait_seconds=0 disables the block-wait: the drain returns
+    immediately while sub-agents run, so the turn can end and completions are
+    dispatched as their own turn instead of being consolidated in-order."""
+    from nanobot.agent.loop import AgentLoop
+    from nanobot.bus.events import InboundMessage
+    from nanobot.bus.queue import MessageBus
+    from nanobot.session.manager import Session
+
+    bus = MessageBus()
+    provider = MagicMock()
+    provider.get_default_model.return_value = "test-model"
+
+    loop = AgentLoop(
+        bus=bus, provider=provider, workspace=tmp_path, model="test-model",
+        subagent_drain_wait_seconds=0,
+    )
+
+    pending_queue: asyncio.Queue = asyncio.Queue()
+    session = Session(key="test:drain-zero-wait")
+    injection_callback = None
+
+    async def fake_runner_run(spec):
+        nonlocal injection_callback
+        injection_callback = spec.injection_callback
+        return SimpleNamespace(
+            stop_reason="done",
+            final_content="done",
+            error=None,
+            tool_events=[],
+            messages=[],
+            usage={},
+            had_injections=False,
+            tools_used=[],
+        )
+
+    loop.runner.run = AsyncMock(side_effect=fake_runner_run)
+
+    # Register a "running" sub-agent that will never complete
+    async def _hang_forever():
+        await asyncio.Event().wait()
+
+    hang_task = asyncio.create_task(_hang_forever())
+    loop.subagents._session_tasks.setdefault(session.key, set()).add("sub-zero-1")
+    loop.subagents._running_tasks["sub-zero-1"] = hang_task
+
+    await loop._run_agent_loop(
+        [{"role": "user", "content": "test"}],
+        session=session,
+        channel="test",
+        chat_id="c1",
+        pending_queue=pending_queue,
+    )
+
+    assert injection_callback is not None
+
+    # Sub-agent is running and the queue is empty — must NOT block.
+    results = await asyncio.wait_for(injection_callback(), timeout=1.0)
+    assert results == []
+
+    # Already-queued items still drain non-blockingly.
+    await pending_queue.put(InboundMessage(
+        sender_id="subagent",
+        channel="test",
+        chat_id="c1",
+        content="Sub-agent result",
+        media=None,
+        metadata={},
+    ))
+    results = await asyncio.wait_for(injection_callback(), timeout=1.0)
+    assert len(results) == 1
+    assert "Sub-agent result" in str(results[0]["content"])
+
+    # Cleanup
+    hang_task.cancel()
+    try:
+        await hang_task
+    except asyncio.CancelledError:
+        pass
+
+
+def test_subagent_drain_wait_config_default_and_alias():
+    """Schema default preserves upstream behavior (300s); camelCase alias accepted."""
+    from nanobot.config.schema import AgentDefaults
+
+    assert AgentDefaults().subagent_drain_wait_seconds == 300.0
+    parsed = AgentDefaults.model_validate({"subagentDrainWaitSeconds": 0})
+    assert parsed.subagent_drain_wait_seconds == 0

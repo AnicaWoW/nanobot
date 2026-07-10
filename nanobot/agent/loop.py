@@ -188,6 +188,7 @@ class AgentLoop:
         model: str | None = None,
         max_iterations: int | None = None,
         max_concurrent_subagents: int | None = None,
+        subagent_drain_wait_seconds: float | None = None,
         context_window_tokens: int | None = None,
         context_block_limit: int | None = None,
         max_tool_result_chars: int | None = None,
@@ -250,6 +251,11 @@ class AgentLoop:
         self.tool_hint_max_length = (
             tool_hint_max_length if tool_hint_max_length is not None
             else defaults.tool_hint_max_length
+        )
+        self.subagent_drain_wait_seconds = (
+            subagent_drain_wait_seconds
+            if subagent_drain_wait_seconds is not None
+            else defaults.subagent_drain_wait_seconds
         )
         self.tools_config = _tc
         self.web_config = _tc.web
@@ -375,6 +381,7 @@ class AgentLoop:
             model=model,
             max_iterations=defaults.max_tool_iterations,
             max_concurrent_subagents=defaults.max_concurrent_subagents,
+            subagent_drain_wait_seconds=defaults.subagent_drain_wait_seconds,
             context_window_tokens=context_window_tokens,
             context_block_limit=defaults.context_block_limit,
             max_tool_result_chars=defaults.max_tool_result_chars,
@@ -764,11 +771,17 @@ class AgentLoop:
             # Block if nothing drained but sub-agents spawned in this dispatch
             # are still running.  Keeps the runner loop alive so subsequent
             # completions are injected in-order rather than dispatched separately.
+            # subagent_drain_wait_seconds=0 disables the wait entirely: the turn
+            # ends without blocking and completions announce as their own turn
+            # (fire-and-forget dispatch for long-running subagents).
             if (not items
                     and session is not None
+                    and self.subagent_drain_wait_seconds > 0
                     and self.subagents.get_running_count_by_session(session.key) > 0):
                 try:
-                    msg = await asyncio.wait_for(pending_queue.get(), timeout=300)
+                    msg = await asyncio.wait_for(
+                        pending_queue.get(), timeout=self.subagent_drain_wait_seconds
+                    )
                 except asyncio.TimeoutError:
                     logger.warning(
                         "Timeout waiting for sub-agent completion in session {}",
