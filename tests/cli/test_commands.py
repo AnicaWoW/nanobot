@@ -15,7 +15,6 @@ from nanobot.cli import commands as cli_commands
 from nanobot.cli.commands import app
 from nanobot.config.schema import Config
 from nanobot.cron.service import CronJobSkippedError
-from nanobot.cron.session_turns import CRON_DEFER_UNTIL_IDLE_META, CRON_TRIGGER_META
 from nanobot.cron.types import CronJob, CronPayload
 from nanobot.cron.webui_metadata import cron_proactive_delivery_metadata
 from nanobot.providers.factory import ProviderSnapshot, make_provider
@@ -1553,9 +1552,17 @@ def test_gateway_unbound_agent_cron_is_skipped(
     bus.publish_outbound.assert_not_awaited()
 
 
-def test_gateway_bound_cron_runs_as_session_turn(
+def test_gateway_bound_cron_dispatches_isolated_work_run(
     monkeypatch, tmp_path: Path
 ) -> None:
+    """A bound job routes to the isolated work runner, not a session turn.
+
+    The runner's own behavior (fresh context, bound message tool, run record,
+    no session persistence) is covered by tests/cron/test_work_runner.py; this
+    test pins the gateway wiring: job/agent/cron pass through unchanged, the
+    send callback is the gateway's *recording* deliverer, and neither the
+    session-turn path nor the legacy heartbeat evaluator is involved.
+    """
     config_file = tmp_path / "instance" / "config.json"
     config_file.parent.mkdir(parents=True)
     config_file.write_text("{}")
@@ -1565,7 +1572,7 @@ def test_gateway_bound_cron_runs_as_session_turn(
     provider = _fake_provider()
     bus = MagicMock()
     bus.publish_outbound = AsyncMock()
-    seen: dict[str, object] = {"run_records": []}
+    seen: dict[str, object] = {"work_runs": []}
 
     monkeypatch.setattr("nanobot.config.loader.set_config_path", lambda _path: None)
     monkeypatch.setattr("nanobot.config.loader.load_config", lambda _path=None: config)
@@ -1592,9 +1599,6 @@ def test_gateway_bound_cron_runs_as_session_turn(
             self.on_job = None
             seen["cron"] = self
 
-        def write_run_record(self, run_id: str, record: dict[str, object]) -> None:
-            seen["run_records"].append((run_id, record))
-
     class _FakeAgentLoop:
         @classmethod
         def from_config(cls, config, bus=None, **extra):
@@ -1606,13 +1610,8 @@ def test_gateway_bound_cron_runs_as_session_turn(
             self.tools = {}
             seen["agent"] = self
 
-        async def submit_cron_turn(self, msg: InboundMessage):
-            seen["cron_msg"] = msg
-            return OutboundMessage(
-                channel=msg.channel,
-                chat_id=msg.chat_id,
-                content="Checked the repo.",
-            )
+        async def submit_cron_turn(self, _msg: InboundMessage):
+            raise AssertionError("bound cron job must not run as a session turn")
 
         async def close_mcp(self) -> None:
             return None
@@ -1630,15 +1629,25 @@ def test_gateway_bound_cron_runs_as_session_turn(
     async def _unexpected_evaluator(*_args, **_kwargs) -> bool:
         raise AssertionError("bound cron must not use legacy response evaluator")
 
+    async def _fake_work_run(job, *, agent, cron, send_callback=None):
+        seen["work_runs"].append(
+            {"job": job, "agent": agent, "cron": cron, "send_callback": send_callback}
+        )
+        return "Checked the repo."
+
     monkeypatch.setattr("nanobot.cron.service.CronService", _FakeCron)
     monkeypatch.setattr("nanobot.cli.commands.AgentLoop", _FakeAgentLoop)
     monkeypatch.setattr("nanobot.channels.manager.ChannelManager", _StopAfterCronSetup)
     monkeypatch.setattr("nanobot.cli.commands.evaluate_response", _unexpected_evaluator)
+    monkeypatch.setattr("nanobot.cron.work_runner.run_cron_work_job", _fake_work_run)
 
     result = runner.invoke(app, ["gateway", "--config", str(config_file)])
     assert isinstance(result.exception, _StopGatewayError)
 
     cron = seen["cron"]
+    assert isinstance(cron, _FakeCron)
+    assert cron.on_job is not None
+
     job = CronJob(
         id="repo-check",
         name="Repo check",
@@ -1653,105 +1662,14 @@ def test_gateway_bound_cron_runs_as_session_turn(
     response = asyncio.run(cron.on_job(job))
 
     assert response == "Checked the repo."
-    msg = seen["cron_msg"]
-    assert isinstance(msg, InboundMessage)
-    assert msg.channel == "websocket"
-    assert msg.chat_id == "chat-1"
-    assert msg.sender_id == "cron"
-    assert msg.session_key_override == "websocket:chat-1"
-    assert "Cron job: Check repository health." in msg.content
-    assert msg.metadata["webui"] is True
-    assert msg.metadata[WEBUI_MESSAGE_SOURCE_METADATA_KEY] == {
-        "kind": "cron",
-        "label": "Repo check",
-    }
-    trigger = msg.metadata[CRON_TRIGGER_META]
-    assert trigger["job_id"] == "repo-check"
-    assert trigger["job_name"] == "Repo check"
-    assert trigger["persist_content"] == (
-        "Scheduled cron job triggered: Repo check\n\nCheck repository health."
-    )
-    assert msg.metadata[CRON_DEFER_UNTIL_IDLE_META] is True
-    statuses = [record["status"] for _run_id, record in seen["run_records"]]
-    assert statuses == ["queued", "ok"]
-    assert seen["run_records"][0][0] == seen["run_records"][1][0]
-
-    discord_job = CronJob(
-        id="thread-check",
-        name="Thread check",
-        payload=CronPayload(
-            message="Check the Discord thread.",
-            session_key="discord:456:thread:777",
-            origin_channel="discord",
-            origin_chat_id="777",
-            origin_metadata={
-                "context_chat_id": "456",
-                "parent_channel_id": "456",
-                "thread_id": "777",
-            },
-        ),
-    )
-
-    response = asyncio.run(cron.on_job(discord_job))
-
-    assert response == "Checked the repo."
-    msg = seen["cron_msg"]
-    assert isinstance(msg, InboundMessage)
-    assert msg.channel == "discord"
-    assert msg.chat_id == "777"
-    assert msg.session_key_override == "discord:456:thread:777"
-    assert msg.metadata["context_chat_id"] == "456"
-    assert msg.metadata["parent_channel_id"] == "456"
-    assert msg.metadata["thread_id"] == "777"
-
-    telegram_job = CronJob(
-        id="telegram-topic",
-        name="Telegram topic",
-        payload=CronPayload(
-            message="Check the Telegram topic.",
-            session_key="telegram:-100123:topic:42",
-            origin_channel="telegram",
-            origin_chat_id="-100123",
-            origin_metadata={"message_thread_id": 42},
-        ),
-    )
-
-    response = asyncio.run(cron.on_job(telegram_job))
-
-    assert response == "Checked the repo."
-    msg = seen["cron_msg"]
-    assert isinstance(msg, InboundMessage)
-    assert msg.channel == "telegram"
-    assert msg.chat_id == "-100123"
-    assert msg.session_key_override == "telegram:-100123:topic:42"
-    assert msg.metadata["message_thread_id"] == 42
-
-    feishu_job = CronJob(
-        id="feishu-topic",
-        name="Feishu topic",
-        payload=CronPayload(
-            message="Check the Feishu topic.",
-            session_key="feishu:oc_abc:om_root123",
-            origin_channel="feishu",
-            origin_chat_id="oc_abc",
-            origin_metadata={
-                "chat_type": "group",
-                "message_id": "om_root123",
-                "thread_id": "om_root123",
-            },
-        ),
-    )
-
-    response = asyncio.run(cron.on_job(feishu_job))
-
-    assert response == "Checked the repo."
-    msg = seen["cron_msg"]
-    assert isinstance(msg, InboundMessage)
-    assert msg.channel == "feishu"
-    assert msg.chat_id == "oc_abc"
-    assert msg.session_key_override == "feishu:oc_abc:om_root123"
-    assert msg.metadata["message_id"] == "om_root123"
-    assert msg.metadata["thread_id"] == "om_root123"
+    assert len(seen["work_runs"]) == 1
+    run = seen["work_runs"][0]
+    assert run["job"] is job
+    assert run["agent"] is seen["agent"]
+    assert run["cron"] is cron
+    # Sends from the run must flow through the gateway's recording deliverer
+    # (mirrors into the origin session), not the bare bus publish.
+    assert getattr(run["send_callback"], "__name__", "") == "_deliver_to_channel"
 
 
 def test_gateway_workspace_override_does_not_migrate_legacy_cron(
