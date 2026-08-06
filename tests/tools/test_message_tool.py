@@ -505,3 +505,41 @@ async def test_message_tool_cli_context_may_target_other_ws_chat(tmp_path) -> No
     assert result.startswith("Message sent")
     assert sent[0].channel == "websocket"
     assert sent[0].chat_id == target
+
+
+@pytest.mark.asyncio
+async def test_message_tool_cross_channel_requires_explicit_chat_id() -> None:
+    """A cross-channel send with no chat_id must refuse, not borrow the caller's.
+
+    The borrowed id belongs to the source channel: delivery may even look fine,
+    but the send is recorded under a phantom target-channel session (e.g.
+    ``admin:<whatsapp phone>``) that no later turn on that channel ever reads.
+    Observed in prod 2026-08-06 (a user-session handoff to the admin channel).
+    """
+    sent: list[OutboundMessage] = []
+
+    async def _send(msg: OutboundMessage) -> None:
+        sent.append(msg)
+
+    tool = MessageTool(send_callback=_send)
+    from nanobot.agent.tools.context import RequestContext
+
+    tool.set_context(RequestContext(channel="whatsapp_gw", chat_id="+4915100000010", metadata={}))
+
+    result = await tool.execute(content="Der Mandant fragt nach dem Bericht.", channel="admin")
+    assert result.startswith("Error:")
+    assert "chat_id" in result
+    assert sent == []
+
+    # Blank counts as missing.
+    result = await tool.execute(content="x", channel="admin", chat_id="  ")
+    assert result.startswith("Error:")
+    assert sent == []
+
+    # Explicit target works; same-channel sends keep inheriting the default.
+    result = await tool.execute(content="x", channel="admin", chat_id="operator")
+    assert result.startswith("Message sent")
+    assert sent[-1].chat_id == "operator"
+    result = await tool.execute(content="y", channel="whatsapp_gw")
+    assert result.startswith("Message sent")
+    assert sent[-1].chat_id == "+4915100000010"

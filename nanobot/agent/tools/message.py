@@ -216,6 +216,21 @@ class MessageTool(Tool, ContextAware):
                 "conversation id from context — WebSocket client_id strings "
                 "(e.g. anon-…) are not chat ids."
             )
+        # A cross-channel send must name its target explicitly: the current
+        # conversation's chat_id belongs to the current channel and is meaningless
+        # on another one. Silently borrowing it files the message under a phantom
+        # session on the target channel (e.g. an admin-channel session keyed by a
+        # WhatsApp phone number) where no later turn will ever find it.
+        if (
+            default_channel
+            and channel != default_channel
+            and (explicit_chat_id is None or not str(explicit_chat_id).strip())
+        ):
+            return (
+                f"Error: sending to channel '{channel}' requires an explicit chat_id — "
+                f"the current conversation's id belongs to '{default_channel}' and does "
+                "not exist there. Pass the target chat_id."
+            )
         chat_id = chat_id or default_chat_id
         # Only inherit default message_id when targeting the same channel+chat.
         # Cross-chat sends must not carry the original message_id, because
