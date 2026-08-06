@@ -1197,7 +1197,15 @@ class AgentLoop:
             channel, chat_id, msg.metadata.get("message_id"),
             msg.metadata, session_key=key,
         )
-        current_role = "assistant" if is_subagent else "user"
+        # Subagent announces are injected (and persisted) as USER-role events, not
+        # assistant text: as assistant voice the model reads the announce as its own
+        # prior words — the template's closing instruction is ignored, the likeliest
+        # continuation is a re-narration of the dispatch ack, and the announce block
+        # becomes a learned pattern the model starts fabricating in later replies
+        # (observed in prod 2026-08-06: invented Result JSON with stale run tokens).
+        # As user voice the instruction is directed AT the model and none of that
+        # pattern-contamination surface exists.
+        current_role = "user"
         _hist_kwargs: dict[str, Any] = {
             "max_messages": self._max_messages,
             "max_tokens": self._replay_token_budget(),
@@ -1744,7 +1752,7 @@ class AgentLoop:
         ):
             return False
         session.add_message(
-            "assistant",
+            "user",
             msg.content,
             sender_id=msg.sender_id,
             injected_event="subagent_result",
