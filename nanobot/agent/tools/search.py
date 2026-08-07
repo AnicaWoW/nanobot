@@ -108,15 +108,24 @@ class _SearchTool(_FsTool):
         return target.relative_to(root).as_posix()
 
     def _iter_files(self, root: Path) -> Iterable[Path]:
+        denied = self._denied_dirs()
         if root.is_file():
-            yield root
+            if not self._under_any(root, denied):
+                yield root
             return
 
         for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = sorted(d for d in dirnames if d not in self._IGNORE_DIRS)
             current = Path(dirpath)
+            dirnames[:] = sorted(
+                d
+                for d in dirnames
+                if d not in self._IGNORE_DIRS and not self._under_any(current / d, denied)
+            )
             for filename in sorted(filenames):
-                yield current / filename
+                candidate = current / filename
+                if self._under_any(candidate, denied):  # symlink detours too
+                    continue
+                yield candidate
 
 
 class FindFilesTool(_SearchTool):
@@ -190,18 +199,27 @@ class FindFilesTool(_SearchTool):
         }
 
     def _iter_paths(self, root: Path, *, include_dirs: bool) -> Iterable[Path]:
+        denied = self._denied_dirs()
         if root.is_file():
-            yield root
+            if not self._under_any(root, denied):
+                yield root
             return
         if include_dirs:
             yield root
         for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = sorted(d for d in dirnames if d not in self._IGNORE_DIRS)
             current = Path(dirpath)
+            dirnames[:] = sorted(
+                d
+                for d in dirnames
+                if d not in self._IGNORE_DIRS and not self._under_any(current / d, denied)
+            )
             if include_dirs and current != root:
                 yield current
             for filename in sorted(filenames):
-                yield current / filename
+                candidate = current / filename
+                if self._under_any(candidate, denied):
+                    continue
+                yield candidate
 
     async def execute(
         self,

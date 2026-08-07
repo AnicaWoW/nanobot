@@ -93,3 +93,56 @@ async def test_main_loop_tools_unaffected_by_default(tmp_path: Path) -> None:
     tool = ReadFileTool(workspace=ws, allowed_dir=ws, restrict_to_workspace=True)
     out = await tool.execute(path="sessions/admin_operator.jsonl")
     assert "operator secret" in str(out)
+
+
+@pytest.mark.asyncio
+async def test_walk_tools_never_descend_into_denied_stores(tmp_path: Path) -> None:
+    """The argument-level check sees only the walk ROOT — grep/find_files/list_dir
+    must also prune denied subtrees per entry, or 'search the whole workspace'
+    walks straight into sessions/ and returns operator dialogue."""
+    ws = _workspace(tmp_path)
+    tools = _manager(ws)._build_tools()
+
+    grep = await tools.execute(
+        "grep", {"pattern": "operator secret", "path": ".", "output_mode": "content"}
+    )
+    # the no-matches message echoes the PATTERN — assert on match content/paths
+    assert "No matches" in str(grep)
+    assert "admin_operator" not in str(grep)
+
+    found = await tools.execute("find_files", {"path": "."})
+    assert "sessions" not in str(found)
+    assert "transcripts" not in str(found)
+    assert "ok.txt" in str(found)
+
+    listing = await tools.execute("list_dir", {"path": ".", "recursive": True})
+    assert "sessions" not in str(listing)
+    assert "transcripts" not in str(listing)
+
+    listing = await tools.execute("list_dir", {"path": "."})
+    assert "sessions" not in str(listing)
+    assert "data" in str(listing)
+
+
+@pytest.mark.asyncio
+async def test_walk_denial_covers_file_symlinks(tmp_path: Path) -> None:
+    ws = _workspace(tmp_path)
+    (ws / "data" / "peek.jsonl").symlink_to(ws / "sessions" / "admin_operator.jsonl")
+    tools = _manager(ws)._build_tools()
+
+    grep = await tools.execute(
+        "grep", {"pattern": "operator secret", "path": "data", "output_mode": "content"}
+    )
+    assert "No matches" in str(grep)
+    assert "peek.jsonl" not in str(grep)
+
+
+@pytest.mark.asyncio
+async def test_main_loop_walks_unaffected_by_default(tmp_path: Path) -> None:
+    """Empty deny list (main-loop default): the walk behavior is unchanged."""
+    from nanobot.agent.tools.search import GrepTool
+
+    ws = _workspace(tmp_path)
+    tool = GrepTool(workspace=ws, allowed_dir=ws, restrict_to_workspace=True)
+    out = await tool.execute(pattern="operator secret", path=".", output_mode="content")
+    assert "operator secret" in str(out)

@@ -146,6 +146,35 @@ class _FsTool(Tool):
         self._check_denied(resolved, access.project_path)
         return resolved
 
+    def _denied_dirs(self) -> list[Path]:
+        """Resolved denied subtree roots for the current workspace (may be empty).
+
+        Walk-style tools (grep, find_files, list_dir) must call this and skip
+        matches — the argument-level check in ``_resolve_with_extra`` only sees
+        the walk's ROOT, so without per-entry pruning a walk from an allowed
+        root would descend into a denied store and return its content.
+        """
+        if not self._denied_subpaths:
+            return []
+        project = current_tool_workspace(self._workspace).project_path
+        if project is None:
+            return []
+        try:
+            root = Path(project).expanduser().resolve(strict=False)
+        except (OSError, RuntimeError):
+            return []
+        return [(root / sub).resolve(strict=False) for sub in self._denied_subpaths]
+
+    @staticmethod
+    def _under_any(path: Path, denied: list[Path]) -> bool:
+        if not denied:
+            return False
+        try:
+            resolved = path.resolve(strict=False)
+        except (OSError, RuntimeError):
+            return True  # unresolvable inside a guarded walk: treat as denied
+        return any(resolved == d or resolved.is_relative_to(d) for d in denied)
+
     def _check_denied(self, resolved: Path, project_path: Path | None) -> None:
         """Refuse paths under a denied workspace subtree, post-resolution."""
         if not self._denied_subpaths or project_path is None:
@@ -1087,9 +1116,12 @@ class ListDirTool(_FsTool):
             items: list[str] = []
             total = 0
 
+            denied = self._denied_dirs()
             if recursive:
                 for item in sorted(dp.rglob("*")):
                     if any(p in self._IGNORE_DIRS for p in item.parts):
+                        continue
+                    if self._under_any(item, denied):
                         continue
                     total += 1
                     if len(items) < cap:
@@ -1098,6 +1130,8 @@ class ListDirTool(_FsTool):
             else:
                 for item in sorted(dp.iterdir()):
                     if item.name in self._IGNORE_DIRS:
+                        continue
+                    if self._under_any(item, denied):
                         continue
                     total += 1
                     if len(items) < cap:
