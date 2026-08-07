@@ -115,10 +115,18 @@ class SubagentManager:
 
     def _subagent_tools_config(self) -> ToolsConfig:
         """Build a ToolsConfig scoped for subagent use."""
+        # Raw conversation stores are never a legitimate subagent surface, and
+        # unlike main-loop turns a subagent carries no workspace brain rules to
+        # say so — deny them structurally, on top of whatever the host config
+        # already denies.
+        file_cfg = self.tools_config.file.model_copy(deep=True)
+        for sub in ("sessions", "transcripts"):
+            if sub not in file_cfg.denied_subpaths:
+                file_cfg.denied_subpaths.append(sub)
         return ToolsConfig(
             exec=self.tools_config.exec,
             web=self.tools_config.web,
-            file=self.tools_config.file,
+            file=file_cfg,
             restrict_to_workspace=self.restrict_to_workspace,
             allowed_tools=list(self.tools_config.allowed_tools),
         )

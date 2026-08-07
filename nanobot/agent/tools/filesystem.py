@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from pydantic import Field
+
 from nanobot.agent.tools.base import Tool, tool_parameters
 from nanobot.agent.tools.file_state import FileStates, _hash_file, current_file_states
 from nanobot.agent.tools.path_utils import resolve_workspace_path
@@ -25,6 +27,11 @@ class FileToolsConfig(Base):
     """Filesystem tools configuration."""
 
     enable: bool = True  # built-in file tools on by default
+    # Workspace-relative subtrees file tools must never read or write, however
+    # the request is phrased. Enforced after full path resolution, so ../ and
+    # symlink detours are covered. Meant for stores the model has no business
+    # opening as files (raw session/transcript records); empty by default.
+    denied_subpaths: list[str] = Field(default_factory=list)
 
 
 class _FsTool(Tool):
@@ -51,6 +58,7 @@ class _FsTool(Tool):
         file_states: FileStates | None = None,
         restrict_to_workspace: bool | None = None,
         sandbox_restricts_workspace: bool = False,
+        denied_subpaths: list[str] | None = None,
     ):
         self._workspace = workspace
         self._allowed_dir = allowed_dir
@@ -73,6 +81,7 @@ class _FsTool(Tool):
         # current async task, which keeps shared tool instances session-safe.
         self._explicit_file_states = file_states
         self._fallback_file_states = FileStates()
+        self._denied_subpaths = list(denied_subpaths or [])
 
     @classmethod
     def create(cls, ctx: Any) -> Tool:
@@ -92,6 +101,7 @@ class _FsTool(Tool):
             file_states=ctx.file_state_store,
             restrict_to_workspace=ctx.config.restrict_to_workspace,
             sandbox_restricts_workspace=sandbox_restricts,
+            denied_subpaths=list(ctx.config.file.denied_subpaths),
         )
 
     @property
@@ -125,7 +135,7 @@ class _FsTool(Tool):
             restrict_to_workspace=self._restrict_to_workspace,
             sandbox_restricts_workspace=self._sandbox_restricts_workspace,
         )
-        return resolve_workspace_path(
+        resolved = resolve_workspace_path(
             path,
             access.project_path,
             self._effective_allowed_root(access.allowed_root),
@@ -133,6 +143,24 @@ class _FsTool(Tool):
             extra_allowed_files,
             include_media_dir=include_media_dir,
         )
+        self._check_denied(resolved, access.project_path)
+        return resolved
+
+    def _check_denied(self, resolved: Path, project_path: Path | None) -> None:
+        """Refuse paths under a denied workspace subtree, post-resolution."""
+        if not self._denied_subpaths or project_path is None:
+            return
+        try:
+            root = Path(project_path).expanduser().resolve(strict=False)
+        except (OSError, RuntimeError):
+            return
+        for sub in self._denied_subpaths:
+            denied = (root / sub).resolve(strict=False)
+            if resolved == denied or resolved.is_relative_to(denied):
+                raise PermissionError(
+                    f"'{sub}/' is a denied store for file tools in this scope "
+                    "(raw conversation records are not a file-tool surface)"
+                )
 
     def _resolve_read(self, path: str) -> Path:
         return self._resolve_with_extra(
