@@ -863,6 +863,12 @@ def _run_gateway(
     from nanobot.bus.events import OutboundMessage
     from nanobot.session.keys import session_key_for_channel
 
+    # Bound below, once the config is far enough along to build it; declared here so
+    # _deliver_to_channel can close over it (it only ever runs during a turn, which
+    # is long after the assignment, but an unbound closure name would raise instead
+    # of skipping the check).
+    channels: ChannelManager | None = None
+
     def _channel_session_key(channel: str, chat_id: str) -> str:
         return session_key_for_channel(
             channel,
@@ -874,6 +880,16 @@ def _run_gateway(
         msg: OutboundMessage, *, record: bool = False, session_key: str | None = None,
     ) -> None:
         """Publish a user-visible message and mirror it into that channel's session."""
+        # Ask the target channel whether this chat id addresses a real conversation
+        # BEFORE anything is written or published. Requiring an explicit chat_id on a
+        # cross-channel send only stops the tool from borrowing the caller's id; a
+        # wrong-but-explicit one still passed, and the mirror below is what turns it
+        # into a phantom session the target channel's later turns never load.
+        target = (channels.channels if channels is not None else {}).get(msg.channel)
+        if target is not None:
+            invalid = target.validate_chat_id(msg.chat_id)
+            if invalid:
+                raise ValueError(invalid)
         metadata = dict(msg.metadata or {})
         record = record or bool(metadata.pop("_record_channel_delivery", False))
         if metadata != (msg.metadata or {}):

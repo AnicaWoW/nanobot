@@ -93,3 +93,11 @@ async def test_handle_message_group_ignores_unknown() -> None:
 
     assert channel._sent == []
 
+
+
+def test_validate_chat_id_has_no_opinion_by_default() -> None:
+    """Channels that cannot enumerate their chats must keep accepting any id."""
+    channel = _DummyChannel(SimpleNamespace(allow_from=[]), MessageBus())
+
+    assert channel.validate_chat_id("anything") is None
+    assert channel.validate_chat_id("") is None

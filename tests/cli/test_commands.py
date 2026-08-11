@@ -10,7 +10,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from typer.testing import CliRunner
 
+from nanobot.agent.tools.message import MessageTool
 from nanobot.bus.events import InboundMessage, OutboundMessage
+from nanobot.channels.base import BaseChannel
 from nanobot.cli import commands as cli_commands
 from nanobot.cli.commands import app
 from nanobot.config.schema import Config
@@ -2236,3 +2238,180 @@ def test_channels_login_requires_channel_name() -> None:
     result = runner.invoke(app, ["channels", "login"])
 
     assert result.exit_code == 2
+
+
+def _gateway_deliverer(monkeypatch, tmp_path: Path, target_channels: dict):
+    """Boot the gateway far enough to bind the channel manager, return its deliverer.
+
+    Stops at the first ``channels.enabled_channels`` read — the statement right
+    after the assignment — so ``_deliver_to_channel`` closes over a real binding.
+    """
+    config_file = tmp_path / "instance" / "config.json"
+    config_file.parent.mkdir(parents=True)
+    config_file.write_text("{}")
+
+    config = Config()
+    config.agents.defaults.workspace = str(tmp_path / "config-workspace")
+    provider = _fake_provider()
+    bus = MagicMock()
+    bus.publish_outbound = AsyncMock()
+    seen: dict[str, object] = {"saved": []}
+
+    monkeypatch.setattr("nanobot.config.loader.set_config_path", lambda _path: None)
+    monkeypatch.setattr("nanobot.config.loader.load_config", lambda _path=None: config)
+    monkeypatch.setattr("nanobot.cli.commands.sync_workspace_templates", lambda _path: None)
+    monkeypatch.setattr("nanobot.providers.factory.make_provider", lambda _config: provider)
+    monkeypatch.setattr(
+        "nanobot.providers.factory.build_provider_snapshot",
+        lambda _config: _test_provider_snapshot(provider, _config),
+    )
+    monkeypatch.setattr(
+        "nanobot.providers.factory.load_provider_snapshot",
+        lambda _config_path=None: _test_provider_snapshot(provider, config),
+    )
+    monkeypatch.setattr("nanobot.bus.queue.MessageBus", lambda: bus)
+
+    class _RecordingSessionManager:
+        def __init__(self, _workspace: Path) -> None:
+            pass
+
+        def get_or_create(self, key: str):
+            session = MagicMock()
+            session.key = key
+            return session
+
+        def save(self, session) -> None:
+            seen["saved"].append(session.key)
+
+    class _FakeCron:
+        def __init__(self, _store_path: Path) -> None:
+            self.on_job = None
+
+    class _FakeAgentLoop:
+        @classmethod
+        def from_config(cls, config, bus=None, **extra):
+            return cls(**extra)
+
+        def __init__(self, *args, **kwargs) -> None:
+            self.model = "test-model"
+            self.provider = kwargs.get("provider", object())
+            self.tools = {"message": MagicMock(spec=MessageTool)}
+            seen["message_tool"] = self.tools["message"]
+
+        async def close_mcp(self) -> None:
+            return None
+
+        async def run(self) -> None:
+            return None
+
+        def stop(self) -> None:
+            return None
+
+    class _FakeChannelManager:
+        def __init__(self, *_args, **_kwargs) -> None:
+            self.channels = target_channels
+
+        @property
+        def enabled_channels(self):
+            raise _StopGatewayError("stop")
+
+    monkeypatch.setattr("nanobot.cron.service.CronService", _FakeCron)
+    monkeypatch.setattr("nanobot.cli.commands.AgentLoop", _FakeAgentLoop)
+    monkeypatch.setattr("nanobot.session.manager.SessionManager", _RecordingSessionManager)
+    monkeypatch.setattr("nanobot.channels.manager.ChannelManager", _FakeChannelManager)
+
+    result = runner.invoke(app, ["gateway", "--config", str(config_file)])
+    assert isinstance(result.exception, _StopGatewayError)
+
+    deliver = seen["message_tool"].set_send_callback.call_args[0][0]
+    assert getattr(deliver, "__name__", "") == "_deliver_to_channel"
+    return deliver, bus, seen
+
+
+class _OneChatChannel(BaseChannel):
+    """A channel that knows its address space — exactly one chat id is real."""
+
+    name = "admin"
+
+    def __init__(self) -> None:  # no bus/config needed for validate_chat_id
+        pass
+
+    async def start(self) -> None:
+        return None
+
+    async def stop(self) -> None:
+        return None
+
+    async def send(self, msg: OutboundMessage) -> None:
+        return None
+
+    def validate_chat_id(self, chat_id: str) -> str | None:
+        if chat_id != "operator":
+            return f"unknown chat id '{chat_id}' on admin — the only chat is 'operator'"
+        return None
+
+
+def test_deliver_refuses_chat_id_the_target_channel_rejects(monkeypatch, tmp_path: Path) -> None:
+    """A wrong-but-explicit chat id must not mint a session or reach the bus.
+
+    Requiring an explicit chat_id on a cross-channel send stops the tool from
+    borrowing the caller's id; it does not stop the model from guessing one. The
+    mirror into the target session runs before delivery, so an unvalidated guess
+    persists as a phantom session that no later turn on that channel loads.
+    """
+    deliver, bus, seen = _gateway_deliverer(monkeypatch, tmp_path, {"admin": _OneChatChannel()})
+
+    msg = OutboundMessage(
+        channel="admin",
+        chat_id="admin",
+        content="Der Mandant hat einen Forecast angefordert.",
+        metadata={"_record_channel_delivery": True},
+    )
+
+    with pytest.raises(ValueError, match="unknown chat id 'admin'"):
+        asyncio.run(deliver(msg))
+
+    assert seen["saved"] == []
+    bus.publish_outbound.assert_not_awaited()
+
+
+def test_deliver_accepts_the_chat_id_the_target_channel_knows(monkeypatch, tmp_path: Path) -> None:
+    deliver, bus, seen = _gateway_deliverer(monkeypatch, tmp_path, {"admin": _OneChatChannel()})
+
+    msg = OutboundMessage(
+        channel="admin",
+        chat_id="operator",
+        content="Bericht steht.",
+        metadata={"_record_channel_delivery": True},
+    )
+
+    asyncio.run(deliver(msg))
+
+    assert seen["saved"] == ["admin:operator"]
+    bus.publish_outbound.assert_awaited_once()
+
+
+def test_deliver_passes_through_channels_without_an_opinion(monkeypatch, tmp_path: Path) -> None:
+    """The base hook returns None, so channels that cannot enumerate chats are unaffected."""
+
+    class _AnyChatChannel(_OneChatChannel):
+        name = "whatsapp_gw"
+
+        def validate_chat_id(self, chat_id: str) -> str | None:
+            return BaseChannel.validate_chat_id(self, chat_id)
+
+    deliver, bus, seen = _gateway_deliverer(
+        monkeypatch, tmp_path, {"whatsapp_gw": _AnyChatChannel()}
+    )
+
+    msg = OutboundMessage(
+        channel="whatsapp_gw",
+        chat_id="+4915771985106",
+        content="Hallo.",
+        metadata={"_record_channel_delivery": True},
+    )
+
+    asyncio.run(deliver(msg))
+
+    assert seen["saved"] == ["whatsapp_gw:+4915771985106"]
+    bus.publish_outbound.assert_awaited_once()

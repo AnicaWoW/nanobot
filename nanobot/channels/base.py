@@ -101,6 +101,19 @@ class BaseChannel(ABC):
         """
         pass
 
+    def validate_chat_id(self, chat_id: str) -> str | None:
+        """Reject a chat id that does not address a real conversation here.
+
+        A channel that knows its own address space overrides this and returns an
+        error message for anything outside it; the default has no opinion, so
+        channels that cannot enumerate their chats keep accepting any id.
+
+        Checked before a proactive/cross-channel send is mirrored into the target
+        session, because that mirror runs ahead of delivery: an id the channel
+        would have refused still creates a session no later turn ever reads.
+        """
+        return None
+
     async def send_delta(self, chat_id: str, delta: str, metadata: dict[str, Any] | None = None) -> None:
         """Deliver a streaming text chunk.
 
